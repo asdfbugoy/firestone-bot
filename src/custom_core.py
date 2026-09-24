@@ -16,7 +16,12 @@ import time
 import threading
 import tkinter as tk
 
-from ctypes import windll, create_unicode_buffer
+# Windows-only DLL loading (use windll on Windows, AppKit on macOS)
+import os
+if os.name == 'nt':
+    from ctypes import windll, create_unicode_buffer
+else:
+    from AppKit import NSWorkspace
 from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 
 import cv2
@@ -554,7 +559,7 @@ def grab_screen_to_mat(region_obj: Union[Match, Region] = None) -> 'np.ndarray |
 
 def get_active_windowtitle() -> Optional[str]:
     """
-    Get the title of the active window
+    Get the title of the active window (Windows) or active app name (macOS).
     """
     if os.name == 'nt':
         hWnd = windll.user32.GetForegroundWindow()
@@ -562,7 +567,11 @@ def get_active_windowtitle() -> Optional[str]:
         buf = create_unicode_buffer(length + 1)
         windll.user32.GetWindowTextW(hWnd, buf, length + 1)
         return buf.value if buf.value else None
-
+    else:
+        # macOS: get active app name via AppKit (NSWorkspace)
+        active_app = NSWorkspace.sharedWorkspace().activeApplication()
+        if active_app and isinstance(active_app, dict):
+            return active_app.get('NSApplicationName', '').lower()
     return None
 
 def mean(collection: List) -> int:
@@ -636,22 +645,26 @@ def on_keyrelease(key) -> None:
     """
     global platform
 
-    app = get_active_windowtitle().lower()
+    app = get_active_windowtitle()
     #Debug.info(f'{app}')
 
-    for word in ['firestone', 'idle', 'rpg']:
-        if not word in app:
-            return
-
-    for _, word in enumerate(['armor games', 'crazygames', 'kongregate', 'minijuegos', 'miniplay', 'r2games', 'yandex']):
-        if word in app:
-            platform = word
-            if word not in ['crazygames']:
-                Debug.warn(f'{word.capitalize()} has not been tested yet. Use at your own risk and let me know if it works or not!')
-                platform += ' (untested)'
-
-    if not platform:
-        Debug.warn('Unrecognized platform. Use at your own risk and let me know if it works or not!')
+    if os.name == 'nt':
+        # Windows: check window title for game/platform
+        app_lower = app.lower() if app else ''
+        for word in ['firestone', 'idle', 'rpg']:
+            if not word in app_lower:
+                return
+        for _, word in enumerate(['armor games', 'crazygames', 'kongregate', 'minijuegos', 'miniplay', 'r2games', 'yandex']):
+            if word in app_lower:
+                platform = word
+                if word not in ['crazygames']:
+                    Debug.warn(f'{word.capitalize()} has not been tested yet. Use at your own risk and let me know if it works or not!')
+                    platform += ' (untested)'
+        if not platform:
+            Debug.warn('Unrecognized platform. Use at your own risk and let me know if it works or not!')
+    else:
+        # macOS: skip platform detection, just run (user knows what they're running)
+        platform = 'macos'
 
     #Debug.info(f'Key released: {key}')
 
