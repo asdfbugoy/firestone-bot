@@ -669,9 +669,9 @@ def on_keyrelease(key) -> None:
     #Debug.info(f'Key released: {key}')
 
     try:
-        # (un)pausing the game using Scroll Lock
+        # (un)pausing the game using Enter
         keys = keyboard.Key
-        if key == keys.scroll_lock:
+        if key == keys.enter:
             if lock_event.is_set():
                 pause_off()
             else:
@@ -723,7 +723,7 @@ def pause_check() -> None:
     System breaks
     """
     if lock_event.is_set():
-        Debug.info('Systems paused, toggle Scroll-Lock to continue. Home to configure.')
+        Debug.info('Systems paused, press Enter to continue. Home to configure.')
         while lock_event.is_set():
             sleep(0.01)
 
