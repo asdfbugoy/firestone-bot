@@ -210,24 +210,30 @@ But sadly, new OculiX IDE looking shiny on my desktop, getting frustrated by the
 
 ## Installation
 - Ensure you have at least [Python 3.10](https://www.python.org/downloads/) installed
-- Install [Tesseract](https://tesseractocr.org/#install)
+- Install [Tesseract](https://tesseractocr.org/#install) (`brew install tesseract` on macOS)
 - Ensure python and tesseract are in your PATH
 - Then:
 ```
 	git clone https://github.com/key2peace/firestone-bot.git
 	cd firestone-bot
-	pip install -r requirements.txt
+	./setup.sh
 ```
+`setup.sh` creates a `.venv` virtualenv, installs `requirements.txt` into it, and verifies
+that every dependency (including the tesseract binary) is importable. Re-run it any time
+after a system rebuild to get a known-good environment in one step.
+
+On macOS, `pydirectinput` (Windows-only) is skipped automatically and input falls back to
+pynput/pyautogui. The pause toggle is the Enter key.
 
 ## Starting
 - Run the code:
 ```
 cd firestone-bot/src
-python main.py
+../.venv/bin/python main.py
 ```
 - Start the game and go full-screen
-- When ready, press the Scroll-Lock key.
-- If things go wrong -> Scroll-Lock
+- When ready, press the Enter key.
+- If things go wrong -> Enter
 
 - Press the HOME button to configure things or run:
 ```
