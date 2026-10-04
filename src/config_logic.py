@@ -233,7 +233,13 @@ def config_page() -> None:
     c.wm_attributes('-topmost', True)
 
     style = ttk.Style()
-    style.theme_use('xpnative')
+    # xpnative is only shipped with Tcl/Tk >= 8.6.13; older runtimes raise a TclError.
+    # Prefer it when available, otherwise keep the current default theme so the dialog still opens.
+    if 'xpnative' in style.theme_names():
+        try:
+            style.theme_use('xpnative')
+        except tk.TclError:
+            pass
     style.configure('LeftTabs.TNotebook', tabposition='wn')
     style.configure('LeftTabs.TNotebook.Tab', width=-20, anchor='e', padding=(10, 8))
     #style.configure('TFrame', background='white')
