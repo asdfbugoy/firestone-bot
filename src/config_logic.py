@@ -17,8 +17,8 @@ from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 config = {
     # System settings
     'logfile':                          'logs/firestone-bot.log',   # location of the logfile
-    'ollama_url':                       'http://localhost:11434',   # url voor ollama
-    'ollama_model':                     'llama3.2:latest',          # model to use for ollama, llama3.2(-vision) should be optimal
+    'ollama_url':                       'http://localhost:11434',   # any local Ollama-compatible server (Ollama, LM Studio, ...)
+    'ollama_model':                     'llama3.2:latest',          # advisor model, llama3.2(-vision) should be optimal
     'tracker_file':                     'index.json',               # name of the filetracker index files
     'wait_page':                        5,                          # float or int value for the timeout waiting for a page to appear
     'min_score':                        0.95,                       # minimal match score
@@ -40,6 +40,7 @@ config = {
     'battle_boss_retry':                5,                          # set minimum battle duration before retrying boss
     'battle_level_back':                5,                          # go back x levels to farm
     'battle_level_farm':                1800,                       # farm time in seconds
+    'arena_advisor_cooldown':           600,                        # seconds to stay out of the arena after an advisor CANCEL
 
     # Exotic Merchant
     'sell_scroll_of_speed':             True,                       # 80 exotic coins
@@ -252,8 +253,8 @@ def config_page() -> None:
     tabs.add(current_tab, text='System')
     current_tab.grid_columnconfigure(1, minsize=400, weight=0)
     input_text(current_tab, 'Logfile', 0, 'logfile')
-    input_text(current_tab, 'Ollama URL', 1, 'ollama_url', ('<Return>', 'ollama_url_verify'))
-    input_text(current_tab, 'Ollama Model', 2, 'ollama_model', ('<Return>', 'ollama_model_verify'))
+    input_text(current_tab, 'Advisor URL (Ollama / LM Studio)', 1, 'ollama_url', ('<Return>', 'ollama_url_verify'))
+    input_text(current_tab, 'Advisor Model', 2, 'ollama_model', ('<Return>', 'ollama_model_verify'))
     input_text(current_tab, 'Tracker file', 3, 'tracker_file')
     input_number(current_tab, 'Page Wait Time', 4, 'wait_page', 1, 30, 0.01)
     slider(current_tab, 'Min match score', 5, 'min_score', 0.8, 1)
@@ -290,6 +291,7 @@ def config_page() -> None:
     input_number(current_tab, 'Boss retry', 20, 'battle_boss_retry', 0, 60, 0.1)
     input_number(current_tab, 'Level back', 21, 'battle_level_back', 0, 60)
     input_number(current_tab, 'Farm time', 22, 'battle_level_farm', 0, 604800)
+    input_number(current_tab, 'Arena advisor cooldown', 23, 'arena_advisor_cooldown', 0, 86400)
 
     current_tab = ttk.Frame(tabs, padding=10)
     tabs.add(current_tab, text='Exotic Merchant')
@@ -461,6 +463,61 @@ def listbox_event(event, item, action, varname) -> None:
 
     config_panel_vars.update({varname: tk.StringVar(value=','.join([item.get(i) for i in range(item.size()) if item.itemcget(i, 'fg') == 'green']))})
 
+# model families known to ship a vision encoder, used when a server
+# does not advertise a 'capabilities' list in /api/tags
+_vision_families = (
+    'llava', 'llavae', 'llama3.2-vision', 'llama4', 'minicpm-v',
+    'qwen2vl', 'qwen2.5vl', 'gemma3', 'bakllava', 'cogvlm',
+    'moondream', 'aya-vision', 'kimi-vl', 'glm-4v'
+)
+
+def advisor_model_supports_vision(model: dict) -> bool:
+    """ Return True if an /api/tags model entry can process images """
+    if 'vision' in model.get('capabilities', []):
+        return True
+
+    family = str(model.get('details', {}).get('family', '')).lower()
+    return any(tag in family for tag in _vision_families)
+
+def advisor_url_status(url: str) -> str:
+    """
+    Classify a configured advisor base url for the settings dialog.
+
+    Accepts any local Ollama-compatible server: Ollama itself is identified
+    via /api/version, while servers such as LM Studio that only expose the
+    Ollama-compatible chat route are identified via /api/tags.
+
+    Args:
+        url (str): The advisor base url as typed by the user
+
+    Returns:
+        str: 'green' when a compatible server was reached, else 'red'
+    """
+    if not re.search(r'^https?://', url):
+        return 'red'
+
+    base = url.rstrip('/')
+    try:
+        response = requests.get(url = f'{base}/api/version', timeout = 5)
+        response.raise_for_status()
+        version = response.json().get('version')
+        if re.search(r'^(\d+\.\d+\.\d+)$', str(version)):
+            print(f'Ollama version {version} detected.\n')
+            return 'green'
+    except Exception:
+        pass
+
+    try:
+        response = requests.get(url = f'{base}/api/tags', timeout = 5)
+        response.raise_for_status()
+        if 'models' in response.json():
+            print('Ollama-compatible server detected (e.g. LM Studio).\n')
+            return 'green'
+    except Exception:
+        pass
+
+    return 'red'
+
 def ollama_model_verify(event, item, varname) -> None:
     global config_panel_vars
 
@@ -477,9 +534,7 @@ def ollama_model_verify(event, item, varname) -> None:
         response.raise_for_status()
         for model in response.json().get('models', {}):
             if model.get('name', '').lower() == config_panel_vars.get(varname, '').get().lower():
-                color = 'green'
-                if not 'vision' in model.get('capabilities', []):
-                    color = 'orange'
+                color = 'green' if advisor_model_supports_vision(model) else 'orange'
                 break
     except Exception:
         pass
@@ -492,20 +547,7 @@ def ollama_url_verify(event, item, varname) -> None:
     if event:
         pass
 
-    url = f'{config_panel_vars.get(varname).get().rstrip('/')}/api/version'
-    color = 'red'
-    if re.search(r'^https?://', url):
-        try:
-            response = requests.get(url = url, timeout = 5)
-            response.raise_for_status()
-            version = response.json().get('version')
-            m = re.search(r'^(\d+\.\d+\.\d+)$', version)
-            if m:
-                print(f'Ollama version {version} detected.\n')
-                color = 'green'
-        except Exception:
-            pass
-
+    color = advisor_url_status(config_panel_vars.get(varname).get())
     item.configure(highlightbackground = color, highlightcolor = color)
 
 def slider(tab, text, row, varname, min_val, max_val) -> None:

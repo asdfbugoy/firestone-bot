@@ -14,7 +14,7 @@ But sadly, new OculiX IDE looking shiny on my desktop, getting frustrated by the
 - Requires the game running fullscreen on the primary monitor at 1920x1080 resolution.
 - Internal timeout mechanisms to reduce cpu load by skipping tasks that are surely not going to appear for a while.
 - Verification of task images before clicking.
-- Ollama support (llama3.2(-vision)) preffered as it already knows the game and is fast and small.
+- AI arena advisor: any local Ollama-compatible server (Ollama, LM Studio, ...) evaluates each Arena of Kings battle and the bot fights, skips, or falls back to the previous behavior when the model is unavailable (llama3.2(-vision) preferred, it already knows the game).
 
 ## Features
 - Auto maximize and disable gamebar on crazygames
