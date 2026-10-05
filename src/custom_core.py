@@ -11,7 +11,6 @@ import json
 import math
 import os
 import re
-import subprocess
 import time
 import threading
 import tkinter as tk
@@ -40,7 +39,16 @@ from config_logic import config, config_page
 
 # Internal variables
 _ollama_cache: List[Dict[str, str]] = []
+_model_vision_cache: Dict[str, bool] = {}
 bot_started: int = time.time_ns()
+
+# model families known to ship a vision encoder, used when a server
+# does not advertise a 'capabilities' list in /api/tags
+_vision_families = (
+    'llava', 'llavae', 'llama3.2-vision', 'llama4', 'minicpm-v',
+    'qwen2vl', 'qwen2.5vl', 'gemma3', 'bakllava', 'cogvlm',
+    'moondream', 'aya-vision', 'kimi-vl', 'glm-4v'
+)
 
 colormap = {
     # name: r_min, r_max, g_min, g_max, b_min, b_max
@@ -102,29 +110,106 @@ def alpha_filter(src_mat: np.ndarray, threshold: int = 128) -> np.ndarray:
     # Merge channels back efficiently via OpenCV
     return cv2.merge([b_ch, g_ch, r_ch, alpha_thresh])
 
+def advisor_model_supports_vision(base_url: str, model_name: str) -> bool:
+    """
+    Check the vision capability of a model on any Ollama-compatible server.
+
+    Probes the server's /api/tags endpoint instead of the `ollama` CLI, so a
+    bare LM Studio installation (or any other Ollama-compatible backend)
+    works without extra tooling. Degrades gracefully on any probe failure:
+    the model is assumed to have no vision capability.
+
+    Args:
+        base_url (str): The configured server base url, e.g. http://localhost:11434
+        model_name (str): The model name as listed by the server
+
+    Returns:
+        bool: True if the model can process images
+    """
+    global _model_vision_cache
+
+    cache_key = f'{base_url}|{model_name}'
+    if cache_key in _model_vision_cache:
+        return _model_vision_cache[cache_key]
+
+    supports_vision = False
+    model_found = False
+    try:
+        response = requests.get(f'{base_url.rstrip("/")}/api/tags', timeout=10)
+        response.raise_for_status()
+        for entry in response.json().get('models', []):
+            if entry.get('name', '').lower() != model_name.lower():
+                continue
+            model_found = True
+            if 'vision' in entry.get('capabilities', []):
+                supports_vision = True
+            else:
+                family = str(entry.get('details', {}).get('family', '')).lower()
+                supports_vision = any(tag in family for tag in _vision_families)
+            break
+    except Exception as error:  # pylint: disable=broad-exception-caught
+        Debug.warn(f'[Advisor] Vision capability probe failed: {error} - assuming no vision.')
+        _model_vision_cache[cache_key] = False
+        return False
+
+    if not model_found:
+        Debug.warn(f'[Advisor] Model {model_name} is not listed by {base_url} - assuming no vision.')
+
+    _model_vision_cache[cache_key] = supports_vision
+    return supports_vision
+
+def parse_advisor_answer(answer: str) -> Tuple[str, str]:
+    """
+    Parse an advisor answer into a battle decision.
+
+    Args:
+        answer (str): The raw model output, expected to be
+            ``FIGHT <percentage>`` or ``CANCEL <percentage>``
+
+    Returns:
+        tuple: (decision, chance) with decision in ['FIGHT', 'CANCEL'],
+            both empty when the answer is not usable
+    """
+    if not answer:
+        return ('', '')
+
+    match = re.match(r'\s*(FIGHT|CANCEL)\s*(\d{1,3})?\s*$', str(answer).strip().upper())
+    if not match:
+        return ('', '')
+
+    return (match.group(1), match.group(2) or '')
+
 def ask_ollama(prompt: str, src_mat = None) -> str:
     """
     Evaluate an enemy lineup against a cached player baseline via /api/chat.
 
-    Guarantees strict sliding-window management by retaining only the first
-    two handshake messages, eliminating context bloat on 8GB VRAM.
+    Talks to any local Ollama-compatible server (Ollama, LM Studio, ...)
+    configured under ollama_url. Guarantees strict sliding-window management
+    by retaining only the first two handshake messages, eliminating context
+    bloat on 8GB VRAM.
+
+    Args:
+        prompt (str): The user prompt, e.g. an [aok] battle evaluation request
+        src_mat (np.ndarray, optional): Screenshot matrix, attached as base64
+            image when the configured model supports vision
+
+    Returns:
+        str: The model answer, or 'FAIL' when the query could not be made
     """
     global _ollama_cache
 
-    ollama_url = f"{config.get('ollama_url','').rstrip('/')}/api/chat"
-    model_name = config.get('ollama_model','')
-    model_info = subprocess.run(['ollama','show', model_name], capture_output=True, check=True)
-    model_vision = True
-    if model_info:
-        if not model_info.returncode:
-            pattern = r'\n    vision\n'
-            match = re.search(pattern, str(model_info.stdout))
-            if not match and src_mat:
-                Debug.warn('[Ollama] This model does not support Vision. ')
-                model_vision = False
-                src_mat = None
-        else:
-            Debug.error(f'[Ollama] Error {model_info.returncode} occured.')
+    base_url = config.get('ollama_url', '').rstrip('/')
+    model_name = config.get('ollama_model', '')
+    if not base_url or not model_name:
+        Debug.warn('[Advisor] No advisor url/model configured - skipping the advisor.')
+        return 'FAIL'
+
+    ollama_url = f'{base_url}/api/chat'
+
+    model_vision = advisor_model_supports_vision(base_url, model_name)
+    if not model_vision and src_mat is not None:
+        Debug.warn('[Advisor] This model does not support vision - dropping the screenshot.')
+        src_mat = None
 
     if not _ollama_cache:
         base_prompt = (
@@ -140,7 +225,7 @@ def ask_ollama(prompt: str, src_mat = None) -> str:
         _ollama_cache = [{'role': 'user', 'content': base_prompt}]
 
         try:
-            Debug.history('[Ollama] Establishing static base handshake cache...')
+            Debug.history('[Advisor] Establishing static base handshake cache...')
             response = requests.post(
                 ollama_url,
                 json={'model': model_name, 'messages': _ollama_cache, 'stream': False},
@@ -151,8 +236,8 @@ def ask_ollama(prompt: str, src_mat = None) -> str:
             if msg:
                 _ollama_cache.append(msg)
         except Exception as error:
-            Debug.error(f'[Ollama] Base handshake failed: {error}')
-            return ''
+            Debug.error(f'[Advisor] Base handshake failed: {error}')
+            return 'FAIL'
 
     payload = {
         'model': model_name,
@@ -165,7 +250,7 @@ def ask_ollama(prompt: str, src_mat = None) -> str:
         'content': prompt
     }
 
-    if model_vision and src_mat:
+    if model_vision and src_mat is not None:
         success, encoded_image = cv2.imencode('.png', src_mat)
         if success:
             message.update({'images': base64.b64encode(encoded_image.tobytes()).decode('utf-8')})
@@ -183,7 +268,7 @@ def ask_ollama(prompt: str, src_mat = None) -> str:
         return response.json().get('message', {}).get('content', '').strip()
 
     except Exception as error:
-        Debug.error(f'[Ollama] Live matchmaking query failed: {error}')
+        Debug.error(f'[Advisor] Live matchmaking query failed: {error}')
         return 'FAIL'
 
 def capture(filename: str) -> bool:
@@ -1620,4 +1705,3 @@ keyboard_listener.start()
 
 # execute immediately
 optimize_alpha_channels()
-#Debug.info(ask_ollama('Can you do this? (Just a yes or no is enough)'))

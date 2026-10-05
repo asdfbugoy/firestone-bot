@@ -10,6 +10,7 @@ import time
 
 from config_logic import config
 from custom_core import (
+    ask_ollama,
     click,
     color_at,
     color_name,
@@ -30,6 +31,7 @@ from custom_core import (
     mouse_up,
     move_to,
     my_round,
+    parse_advisor_answer,
     parse_ui_timeout,
     pause_check,
     pause_off,
@@ -139,6 +141,25 @@ def arena_of_kings(trigger: bool = False) -> int:
     if not page_wait('arena_of_kings'):
         return -1
 
+    # Battle decision: consult the local AI advisor (Ollama / LM Studio) about
+    # the current challenger. The answer is restricted to FIGHT/CANCEL plus the
+    # chance percentage; any answer we cannot act on (including FAIL from a
+    # dead or slow local model) falls back to the previous behavior.
+    opponent_text = Region(200, 200, 1500, 700).text()[:2000]
+    answer = ask_ollama(f'[aok]\n{opponent_text}', grab_screen_to_mat())
+    decision, chance = parse_advisor_answer(answer)
+
+    if decision == 'FIGHT':
+        Debug.history(f'[arena_of_kings] Advisor: FIGHT {chance}% - taking this battle')
+        return 0
+
+    if decision == 'CANCEL':
+        cooldown = int(config.get('arena_advisor_cooldown', 600))
+        Debug.history(f'[arena_of_kings] Advisor: CANCEL {chance}% - skipping the arena for {cooldown}s')
+        go_home()
+        return get_timeout(cooldown)
+
+    Debug.warn(f"[arena_of_kings] Advisor gave no decision ({answer!r}) - proceeding with the default flow")
     return 0
 
 def bag(trigger: bool = False) -> int:
