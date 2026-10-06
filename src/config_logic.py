@@ -3,7 +3,9 @@ Configuration related stuff
 """
 import json
 import os
+import platform
 import re
+import subprocess
 import sys
 
 import mss
@@ -225,6 +227,73 @@ def config_load() -> None:
     else:
         config_save()
 
+def _mac_display_details() -> Optional[List[Tuple[Optional[str], bool]]]:
+    """ Best-effort (name, main flag) pair for every active macOS display """
+    if platform.system() != 'Darwin':
+        return None
+    # mss monitor dicts carry left/top/width/height only (mss 9 and mss 10 alike),
+    # so there is no name or primary field to read for a useful combobox label.
+    # system_profiler lists the active displays in the same order CoreGraphics
+    # (and thus mss) does, so the pairs line up positionally with the monitor
+    # entries. The output is localized, so on a non-English system the
+    # section/property names no longer match and we degrade to None, which
+    # makes the caller fall back to the generic label.
+    try:
+        output = subprocess.run(
+            ['system_profiler', 'SPDisplaysDataType'],
+            capture_output=True, text=True, timeout=10, check=False,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    details: List[Tuple[Optional[str], bool]] = []
+    displays_indent: Optional[int] = None
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        indent = len(line) - len(line.lstrip())
+        if re.match(r'^\s+Displays:\s*$', line):
+            displays_indent = indent
+            continue
+        if displays_indent is None or indent <= displays_indent:
+            continue
+        if stripped.endswith(':'):
+            # display entry header, e.g. 'Color LCD:' or 'UltraFine 32:'
+            details.append((stripped[:-1].strip() or None, False))
+            continue
+        if not details:
+            continue
+        match = re.match(r'^\s+Display Type:\s*(.+)$', line)
+        if match:
+            _name, main = details[-1]
+            details[-1] = (match.group(1).strip(), main)
+            continue
+        match = re.match(r'^\s+Main Display:\s*(\w+)', line, re.IGNORECASE)
+        if match:
+            name, _main = details[-1]
+            details[-1] = (name, match.group(1).lower() == 'yes')
+    return details or None
+
+def monitor_label(idx: int, monitor: Dict[str, Any], details: Optional[List[Tuple[Optional[str], bool]]] = None) -> str:
+    """ Build the config dialog label for one mss monitor entry """
+    width = monitor.get('width', 0)
+    height = monitor.get('height', 0)
+    left = monitor.get('left', monitor.get('x', 0))
+    top = monitor.get('top', monitor.get('y', 0))
+    name = monitor.get('name')
+    is_primary = bool(monitor.get('is_primary'))
+    if details is not None and idx < len(details):
+        detail_name, detail_main = details[idx]
+        if not name:
+            name = detail_name
+        is_primary = is_primary or detail_main
+    # the origin keeps same-size displays distinguishable
+    label = f'Display {idx + 1}: {name or "unknown"} @ {width}x{height}'
+    if is_primary:
+        label += ' (primary)'
+    return label + f' ({left}, {top})'
+
 def config_page() -> None:
     """ Settings dialog """
     global config_panel_vars, current_tab
@@ -265,14 +334,15 @@ def config_page() -> None:
     input_number(current_tab, 'Page Wait Time', 4, 'wait_page', 1, 30, 0.01)
     slider(current_tab, 'Min match score', 5, 'min_score', 0.8, 1)
 
-    values = []
     monitors = mss.MSS().monitors[1::]
-    for idx, monitor in enumerate(monitors):
-        # name/is_primary are optional in mss >= 10; fall back gracefully
-        text = f'Display {idx + 1}: {monitor.get('name', 'unknown')} @ {monitor['width']}x{monitor['height']}'
-        if monitor.get('is_primary', False):
-            text += ' (primary)'
-        values.append(text)
+    # mss 9 and mss 10 both fill monitor dicts with left/top/width/height only,
+    # so monitor_label() drives the text: it uses the dict's own name/is_primary
+    # keys when a runtime supplies them, enriches macOS with the real display
+    # names, and keeps the origin fallback so the entries stay distinguishable.
+    details = _mac_display_details()
+    if details is not None and len(details) != len(monitors):
+        details = None
+    values = [monitor_label(idx, monitor, details) for idx, monitor in enumerate(monitors)]
     combobox(text='Monitor', row=6, varname='monitor', values=values)
 
     current_tab = ttk.Frame(tabs, padding=10)
